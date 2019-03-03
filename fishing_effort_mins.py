@@ -7,8 +7,9 @@ Created on Wed Feb 13 16:14:13 2019
 """
 
 import pandas as pd
+pd.set_option('mode.chained_assignment', 'raise')
+
 import os
-import io
 import timeit
 from contextlib import contextmanager
 

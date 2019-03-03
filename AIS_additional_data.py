@@ -8,10 +8,14 @@ Created on Tue Feb 19 16:40:29 2019
 #%% Function definitions
 
 import pandas as pd
+pd.set_option('mode.chained_assignment', 'raise')
+
 import os
 import numpy as np
 import timeit
 from contextlib import contextmanager
+
+
 
 @contextmanager
 def print_with_time(*s):
@@ -90,10 +94,7 @@ def additional_data(df):
         df['BOE_shrimp'] = df['Nombre'].isin(shrimp_BOE)
         df['Giulia_shrimp'] = df['Nombre'].isin(shrimp_Giulia)
         df['VMS'] = df['Nombre'].isin(VMS_Palamos or VMS_Arenys or VMS_Blanes or VMS_Barcelona)
-        
-        # Create extra columns that Trawling and Haul_id that will be needed in the future
-        df['Trawling'] = np.zeros(len(df), dtype=bool)
-        df['Haul id'] = np.full(len(df), np.nan, dtype=np.float32)    
+
     return df
 
 def classify_sog(sog_col, sog_low, sog_high):
@@ -109,36 +110,45 @@ def classify_sog(sog_col, sog_low, sog_high):
         class_sog[sog_col > sog_high] = 2
     return class_sog
 
-def get_chunk_indices(a):
-    a = np.asarray(a)
-    diffs = a[:-1] != a[1:] # True when two consecutive values are different
-    indices = np.arange(len(a))
+def get_chunk_indices(a, in_same_chunk_fn = lambda x, y: x == y):
+    len_a = len(a)
+    if type(a) is pd.DataFrame:
+        a = a.iloc
+    diffs = [not in_same_chunk_fn(a[i], a[i+1]) for i in range(len_a-1)]
+    indices = np.arange(len_a)
     start_indices = indices[1:][diffs].tolist() # index of the first different value
     start_indices.insert(0,0) # insert first index
     end_indices = indices[:-1][diffs].tolist() # index of the last 'equal' value of the chunk
-    end_indices.append(len(a)-1) # insert last index
-    return start_indices, end_indices
-def get_chunks(a):
-    a = np.asarray(a)
-    start_indices, end_indices = get_chunk_indices(a)
-    values = a[start_indices]
-    return list(zip(start_indices, end_indices, values))
+    end_indices.append(len_a-1) # insert last index
+    return list(zip(start_indices, end_indices))
 
-def identify_trawling(df, min_duration_false_negative, min_haul, start_trawl_id=1):
+def get_same_period_fn(minutes_diff):
+    def same_period(x, y):
+        """ Evaluates entries that are registered in less than 'minutes_diff' in order to decide if they
+        belong in the same chunk
+        """
+        time_diff = pd.Timedelta(minutes=minutes_diff)
+        time_cond = y['Fecha_Posicion_min'] - x['Fecha_Posicion_min'] < time_diff
+        sog_cond = x["Sog_criteria"] == y["Sog_criteria"]
+        vessel_cond = x["Nombre"] == y["Nombre"]
+        return time_cond and sog_cond and vessel_cond
+    return same_period
+
+def identify_trawling(df, min_haul, min_duration_false_negative, AIS_turn_off, start_trawl_id=1):
     """ 
     Identifies trawling and haul ids.
-    
+
     First:
+    Find false-positives: when vessel is navigating at trawling speed but
+    not doing a haul.
+    This is corrected by establishing a minimum trawling duration (min_haul)
+
+    Then:
     Find false-negatives: when vessel decreases/increases speed below/above
     trawling threshold but is actually still trawling.
     These are identified by establishing a maximum time that the vessel can 
     be doing a haul at a slower speed (min_duration_false_negative)
-    
-    Then:
-    Find false-positives: when vessel is navigating at trawling speed but
-    not doing a haul.
-    This is corrected by establishing a minimum trawling duration (min_haul)
-    
+
     Finally:
     Creates new columns (Trawl, Haul_id) establishing whether vessel is trawling and the haul ID
     
@@ -146,66 +156,79 @@ def identify_trawling(df, min_duration_false_negative, min_haul, start_trawl_id=
     df = DataFrame
     min_duration_false_negative = duration that these events take in minutes (maximum duration)
     min_haul = minimum duration of a haul (time in minutes)
+    AIS_turn_off = maximum time that the AIS is turned off before considering it belongs to a different haul
     
     Returns DataFrame with the additional columns of 'Sog criteria', 'Trawling'
     and 'Haul id'
     """
+
+    # Create extra columns that Trawling and Haul_id that will be needed in the future
+    df['Trawling'] = np.zeros(len(df), dtype=bool)
+    df['Haul id'] = np.full(len(df), np.nan, dtype=np.float32)
+
     # Convert column into datetime to be able to recognize duration of each section
     df['Fecha_Posicion_min'] = pd.to_datetime(df['Fecha_Posicion_min'])
+
+    with print_with_time('Identifying false-positives'):
+        # Converts min_haul into datetime format
+        min_haul = pd.Timedelta(minutes = min_haul)
+        # Creates a list of tuples (index start, index end) of all the 'chunks' based on same SOG criteria (0,1,2)
+        # considering that the vessel's AIS has been turned off during less than 'AIS_turn_off'.
+        classify_trawling_list = get_chunk_indices(df, get_same_period_fn(AIS_turn_off))
+        for i, j in classify_trawling_list:
+            if df['Sog_criteria'][i] == 1:
+                if df['Fecha_Posicion_min'][j]-df['Fecha_Posicion_min'][i] > min_haul:
+                    df.loc[i:j + 1, 'Trawling'] = True
+
     # Convert min_duration_false_negative into minutes (time format)
     min_duration = pd.Timedelta(minutes = min_duration_false_negative)
     # Get chunks of start and end indexes of each criteria. get_chunks returns 
     # a tuple of 3 values: start_index, end_index, classification (in this case: 0,1,2)
     with print_with_time('Identifying false-negatives'):
-        classify_trawling_list = get_chunks(df['Sog criteria'])
         # Check if 0 (low speed) or 2 (high speeds) are between 1 (trawling speed) and its duration.
         # If the duration of these reductions in speeds (between trawling) are less
         # than the specified time criteria, it is converted into 1 (trawling speed)
-        for i in range(1, len(classify_trawling_list)-2):
-            prev_class = classify_trawling_list[i-1][2]
-            next_class = classify_trawling_list[i+1][2]
+        for idx in range(1, len(classify_trawling_list)-2):
+            prev_class = df['Sog_criteria'][classify_trawling_list[idx-1][1]] # Checks the Sog_criteria of previous chunk
+            next_class = df['Sog_criteria'][classify_trawling_list[idx+1][1]] # Checks the Sog_criteria of following chunk
             if prev_class == 1 and next_class == 1: # If current classification is between two trawling classifications
-                start,end = classify_trawling_list[i][0:2]
+                start,end = classify_trawling_list[idx]
                 if df['Fecha_Posicion_min'][end] - df['Fecha_Posicion_min'][start] <= min_duration:
-                    classify_trawling_list[i] = (start, end, 1)
-        # Decompresses the classification into a new column, correcting the false-negatives
-        sog_crit_2 = np.zeros(len(df),dtype=int)
-        for element in classify_trawling_list:
-            sog_crit_2[element[0]:element[1]+1] = element[2]
-        # Get chunks of start and end indexes of each criteria
-        classify_trawling_list_2 = get_chunks(sog_crit_2)
+                    df.loc[start:end+1, 'Trawling'] = True
 
-    with print_with_time('Identifying false-positives, Trawling, and Haul_id'):
-        # Converts min_haul into datetime format
-        min_haul = pd.Timedelta(minutes = min_haul)
-        # Checks whether the trawl duration is greater than the minimum duration of 
-        # haul and saves the information in a new column
+    with print_with_time('Identifying Haul_id'):
         cnt = 0
-        for i in classify_trawling_list_2:
-            if i[2] == 1:
-                if df['Fecha_Posicion_min'][i[1]]-df['Fecha_Posicion_min'][i[0]] > min_haul:
-                    df['Trawling'][i[0]:i[1]+1] = True
-                    df['Haul id'][i[0]:i[1]+1] = cnt + start_trawl_id
-                    cnt += 1
+        for i,j in classify_trawling_list:
+            if df['Trawling'][i] == True:
+                df.loc[i:j+1, 'Haul id'] = cnt + start_trawl_id
+            cnt += 1
     return df, cnt
 
 #%% Calling functions
-file_dir = 'DATA/Output/'
+if __name__ == "__main__":
+    file_dir = 'Data/Output/Prova'
+    assert os.path.exists(file_dir)
 
-dir_output = os.path.join(file_dir, 'Output_trawl')
-os.makedirs(dir_output, exist_ok=True)
+    dir_output = os.path.join(file_dir, 'Output_trawl')
+    os.makedirs(dir_output, exist_ok=True)
 
-df = pd.DataFrame() # Create empty DataFrame 
+    df = pd.DataFrame() # Create empty DataFrame
 
-cnt = 0
-for file in os.listdir(file_dir): # Open all Excel files in the directory 
-    if file[-3:] == 'xls':
-        with print_with_time('Opening file ',file):
-            df = pd.read_excel(os.path.join(file_dir, file))
-        df = additional_data(df)
-        df['Sog criteria'] = classify_sog(df['Sog'], 1.0, 3.8)
-        df, n_trawls = identify_trawling(df, 5, 10, cnt+1)
-        cnt += n_trawls
-        new_file = file[:-4]+'_trawl.xls'
-        with print_with_time('Saving file ', new_file):
-            df.to_excel(os.path.join(dir_output,new_file), index=None)
+    cnt = 0
+    for file in os.listdir(file_dir): # Open all Excel files in the directory
+        if file[-3:] == 'xls':
+            with print_with_time('Opening file ',file):
+                df = pd.read_excel(os.path.join(file_dir, file))
+            #df = additional_data(df)
+            df['Sog_criteria'] = classify_sog(sog_col=df['Sog'],
+                                              sog_low=1.0,
+                                              sog_high=3.8)
+            df, n_trawls = identify_trawling(df,
+                                             min_haul=20,
+                                             min_duration_false_negative=5,
+                                             AIS_turn_off=60,
+                                             start_trawl_id=cnt+1)
+            cnt += n_trawls
+            new_file = file[:-4]+'_trawl.xls'
+            with print_with_time('Saving file ', new_file):
+                df.to_excel(os.path.join(dir_output,new_file), index=None)
