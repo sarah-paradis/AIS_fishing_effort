@@ -163,20 +163,11 @@ def identify_trawling(df, datetime_column, min_haul, min_duration_false_negative
         for idx in range(1, len(classify_trawling_list)-2):
             prev_trawl = df['Trawling'][classify_trawling_list[idx-1][1]] # Checks Trawling of previous chunk
             prev_class = df['Sog_criteria'][classify_trawling_list[idx-1][1]] # Checks Sog criteria of previous chunk
-#            next_trawl = df['Trawling'][classify_trawling_list[idx+1][1]] # Checks Trawling of following chunk
             next_class = df['Sog_criteria'][classify_trawling_list[idx+1][1]] # Checks Sog criteria of following chunk
             if prev_class == 1 and next_class == 1 and prev_trawl == True: # If current classification is between two trawling classifications
                 start,end = classify_trawling_list[idx]
                 if df[datetime_column][end] - df[datetime_column][start] <= min_duration:
                     df.loc[start:end, 'Trawling'] = True
-            # Convert the chunk that has Sog_criteria 1 but doesn't last more 
-            # than 20 mins (not taken into account in Identifying false_positives) into Trawling = True
-#            if prev_trawl == False:
-#                start,end = classify_trawling_list[idx-1]
-#                df.loc[start:end, 'Trawling'] = True
-#            elif next_trawl == False:
-#                start,end = classify_trawling_list[idx+1]
-#                df.loc[start:end, 'Trawling'] = True
 
     with print_with_time('Identifying Haul_id'):
         cnt = 0
