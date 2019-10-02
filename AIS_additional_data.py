@@ -146,7 +146,7 @@ def identify_trawling(df, datetime_column, min_haul, min_duration_false_negative
         # considering that the vessel's AIS has been turned off during less than 'AIS_turn_off'.
         classify_trawling_list = get_chunk_indices(df, get_same_period_fn(AIS_turn_off, 
                                                                           ['Sog_criteria', 
-                                                                           'Nombre',
+                                                                           name_column,
                                                                            'Date']))
         for i, j in classify_trawling_list:
             if df['Sog_criteria'][i] == 1:
@@ -173,7 +173,7 @@ def identify_trawling(df, datetime_column, min_haul, min_duration_false_negative
         cnt = 0
         new_trawling_list = get_chunk_indices(df, get_same_period_fn(AIS_turn_off,
                                                                      ['Trawling', 
-                                                                      'Nombre',
+                                                                      name_column,
                                                                       'Date']))
         for i,j in new_trawling_list:
             if df['Trawling'][i] == True:
